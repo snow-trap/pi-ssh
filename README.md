@@ -19,7 +19,7 @@ This is useful when:
 ## Features
 
 - `--ssh user@host` or `--ssh user@host:/remote/path`
-- optional port: `--ssh-port 2222` (alias: `-p 2222`, default: `22`)
+- optional port override: `--ssh-port 2222` (alias: `-p 2222`)
 - Remote tool delegation for:
   - `read`
   - `write`
@@ -67,7 +67,7 @@ cp /path/to/pi-ssh/index.ts ~/.pi/agent/extensions/pi-ssh.ts
 
 ```bash
 pi --ssh user@my-vm
-# same, explicit default
+# optionally override the SSH-config/default port
 pi --ssh user@my-vm --ssh-port 22
 ```
 
@@ -82,7 +82,7 @@ pi --ssh user@my-vm:/home/user/chromium/src -p 2222
 You should see a status line similar to:
 
 ```text
-SSH user@my-vm:/home/user/chromium/src (port 22)
+SSH user@my-vm:/home/user/chromium/src (port ssh-config/default)
 ```
 
 ## Typical workflow
