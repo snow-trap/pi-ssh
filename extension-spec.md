@@ -63,10 +63,11 @@ Optional support included in this project for read-only tools:
 How it works:
 
 - Register a `--ssh` flag (`user@host` or `user@host:/remote/path`)
+- Optionally accept `--ssh-port` / `-p` as an explicit SSH port override
 - Resolve remote cwd on startup (`pwd` if path omitted)
 - Override tools by re-registering tool names
 - Map local absolute paths to remote absolute paths
-- Execute remote commands using `ssh ... bash -lc ...`
+- Execute remote commands using the local `ssh` client
 - Reuse built-in tool factories with custom operations
 
 Pros:
@@ -141,8 +142,10 @@ Use Option A as the first publishable OSS cut.
 
 - `--ssh user@host`
 - `--ssh user@host:/remote/path`
+- optional port override: `--ssh-port 2222` or `-p 2222`
 
 If path is omitted, remote cwd is detected with `pwd`.
+If no port override is provided, `pi-ssh` defers to normal OpenSSH resolution, including matching `~/.ssh/config` `Host` entries and the SSH default port.
 
 ## Tool behavior details
 
@@ -189,8 +192,6 @@ Contents:
 
 ## Future roadmap
 
-1. Connection reuse (control master / mux)
-2. Optional persistent remote shell channel
-3. Better remote capability detection
-4. Optional remote git metadata widget
-5. Optional provider proxy mode for reverse model tunnel workflows
+1. Better remote capability detection
+2. Optional remote git metadata widget
+3. Optional provider proxy mode for reverse model tunnel workflows
