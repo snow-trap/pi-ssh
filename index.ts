@@ -282,6 +282,7 @@ class PersistentRemoteShell {
   private child: ChildProcessWithoutNullStreams | null = null;
   private running: RunningCommand | null = null;
   private disposed = false;
+  private startupPromise: Promise<void> | null = null;
   // Incremental streaming state: tracks how many bytes of the normalized
   // (post-start-marker) output have already been sent via onData.
   private streamedBytes = 0;
@@ -314,39 +315,96 @@ class PersistentRemoteShell {
       throw new Error("Remote shell is disposed");
     }
     if (this.child && !this.child.killed) {
+      if (this.startupPromise) {
+        await this.startupPromise;
+      }
+      return;
+    }
+    if (this.startupPromise) {
+      await this.startupPromise;
       return;
     }
 
-    const child = spawn("ssh", [...buildSshBaseArgs(this.connection.port), "-tt", this.connection.remote], {
-      stdio: ["pipe", "pipe", "pipe"],
+    this.startupPromise = new Promise<void>((resolve, reject) => {
+      const child = spawn("ssh", [...buildSshBaseArgs(this.connection.port), "-tt", this.connection.remote], {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      let settled = false;
+      const startupMarker = `__PI_SSH_READY_${Date.now()}_${Math.random().toString(16).slice(2)}__`;
+      const startupStdoutChunks: Buffer[] = [];
+      const startupStderrChunks: Buffer[] = [];
+
+      const finishResolve = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+
+      const finishReject = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+
+      child.on("error", (error) => {
+        if (!settled) {
+          finishReject(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+        if (this.running) {
+          this.running.reject(error instanceof Error ? error : new Error(String(error)));
+          this.cleanupRunning();
+        }
+      });
+
+      child.on("close", () => {
+        if (!settled) {
+          const stderr = Buffer.concat(startupStderrChunks).toString("utf-8").trim();
+          finishReject(new Error(stderr || "SSH shell closed during startup"));
+          return;
+        }
+        if (this.running) {
+          this.running.reject(new Error("SSH shell closed unexpectedly"));
+          this.cleanupRunning();
+        }
+        this.child = null;
+      });
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (!settled) {
+          startupStdoutChunks.push(chunk);
+          const text = this.normalize(Buffer.concat(startupStdoutChunks).toString("utf-8"));
+          if (text.includes(`${startupMarker}\n`)) {
+            finishResolve();
+            return;
+          }
+        }
+        this.handleStdout(chunk);
+      });
+
+      child.stderr.on("data", (chunk: Buffer) => {
+        if (!settled) {
+          startupStderrChunks.push(chunk);
+        }
+        this.handleStderr(chunk);
+      });
+
+      this.child = child;
+      this.child.stdin.write(
+        "stty -echo 2>/dev/null || true; unset PROMPT_COMMAND 2>/dev/null || true; PS1=''; PS2=''; PROMPT=''; RPROMPT=''; " +
+          "export PAGER=cat; export GIT_PAGER=cat; export GIT_TERMINAL_PROMPT=0; " +
+          "if [ -n \"${ZSH_VERSION-}\" ]; then precmd_functions=(); preexec_functions=(); chpwd_functions=(); unset zle_bracketed_paste 2>/dev/null || true; fi; " +
+          "if [ -n \"${BASH_VERSION-}\" ]; then bind 'set enable-bracketed-paste off' 2>/dev/null || true; fi; " +
+          `cd -- ${shellQuote(this.connection.remoteCwd)}; printf '${startupMarker}\\n'\n`,
+      );
     });
 
-    child.on("error", (error) => {
-      if (this.running) {
-        this.running.reject(error instanceof Error ? error : new Error(String(error)));
-        this.cleanupRunning();
-      }
-    });
-
-    child.on("close", () => {
-      if (this.running) {
-        this.running.reject(new Error("SSH shell closed unexpectedly"));
-        this.cleanupRunning();
-      }
-      this.child = null;
-    });
-
-    child.stdout.on("data", (chunk: Buffer) => this.handleStdout(chunk));
-    child.stderr.on("data", (chunk: Buffer) => this.handleStderr(chunk));
-
-    this.child = child;
-    this.child.stdin.write(
-      "stty -echo 2>/dev/null || true; unset PROMPT_COMMAND 2>/dev/null || true; PS1=''; PS2=''; PROMPT=''; RPROMPT=''; " +
-        "export PAGER=cat; export GIT_PAGER=cat; export GIT_TERMINAL_PROMPT=0; " +
-        "if [ -n \"${ZSH_VERSION-}\" ]; then precmd_functions=(); preexec_functions=(); chpwd_functions=(); unset zle_bracketed_paste 2>/dev/null || true; fi; " +
-        "if [ -n \"${BASH_VERSION-}\" ]; then bind 'set enable-bracketed-paste off' 2>/dev/null || true; fi\n",
-    );
-    this.child.stdin.write(`cd -- ${shellQuote(this.connection.remoteCwd)}\n`);
+    try {
+      await this.startupPromise;
+    } finally {
+      this.startupPromise = null;
+    }
   }
 
   private handleStdout(chunk: Buffer): void {
