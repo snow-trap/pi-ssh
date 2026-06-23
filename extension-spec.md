@@ -47,28 +47,29 @@ We want a third mode:
 
 ### Option A: Tool-level SSH delegation (chosen for MVP)
 
-Implement a pi extension that overrides built-in tools and delegates operations over SSH:
+Implement a pi extension that registers dedicated remote tools and delegates
+their operations over SSH:
 
-- `read`
-- `write`
-- `edit`
-- `bash`
+- `ssh_read`
+- `ssh_write`
+- `ssh_edit`
+- `ssh_bash`
 
-Optional support included in this project for read-only tools:
-
-- `ls`
-- `find`
-- `grep`
+The built-in `read`/`write`/`edit`/`bash` tools are deliberately left alone so
+the extension coexists with other extensions that own those names (for example
+`pi-read-map` or `pi-sandbox`). An earlier design overrode the built-ins by
+re-registering their names; that fails to load whenever another extension also
+claims `read`/`bash`, so it was replaced with the `ssh_*` naming.
 
 How it works:
 
 - Register a `--ssh` flag (`user@host` or `user@host:/remote/path`)
 - Optionally accept `--ssh-port` / `-p` as an explicit SSH port override
 - Resolve remote cwd on startup (`pwd` if path omitted)
-- Override tools by re-registering tool names
+- Register `ssh_*` tools backed by the built-in tool factories with custom
+  remote operations; the agent is steered to them via the system prompt
 - Map local absolute paths to remote absolute paths
 - Execute remote commands using the local `ssh` client
-- Reuse built-in tool factories with custom operations
 
 Pros:
 

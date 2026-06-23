@@ -973,16 +973,29 @@ export default function piSshExtension(pi: ExtensionAPI): void {
 
   const getConnection = () => connection;
 
+  // Dedicated, uniquely-named remote tools instead of overriding the built-in
+  // read/write/edit/bash. Overriding collides with any other extension that
+  // also owns those names (e.g. pi-read-map's `read`, pi-sandbox's `bash`),
+  // which pi rejects at load time. With ssh_* names, pi-ssh coexists with them:
+  // the built-in/other-extension read/bash stay LOCAL, and remote work is
+  // explicit via these tools.
+  const requireSsh = (toolName: string): { conn: SshConnection; transport: SshTransport } => {
+    const conn = getConnection();
+    if (!conn || !transport) {
+      throw new Error(
+        `${toolName} requires an active SSH connection. Start pi with --ssh user@host[:/path] (or resume an SSH session).`,
+      );
+    }
+    return { conn, transport };
+  };
+
   pi.registerTool({
     ...localRead,
+    name: "ssh_read",
+    label: "ssh_read",
+    description: `Read a file on the remote SSH host. ${localRead.description}`,
     async execute(id, params, signal, onUpdate) {
-      const conn = getConnection();
-      if (!conn) {
-        return localRead.execute(id, params, signal, onUpdate);
-      }
-      if (!transport) {
-        return localRead.execute(id, params, signal, onUpdate);
-      }
+      const { conn, transport } = requireSsh("ssh_read");
       const tool = createReadTool(localCwd, { operations: createRemoteReadOps(conn, transport) });
       return tool.execute(id, params, signal, onUpdate);
     },
@@ -990,14 +1003,11 @@ export default function piSshExtension(pi: ExtensionAPI): void {
 
   pi.registerTool({
     ...localWrite,
+    name: "ssh_write",
+    label: "ssh_write",
+    description: `Write a file on the remote SSH host. ${localWrite.description}`,
     async execute(id, params, signal, onUpdate) {
-      const conn = getConnection();
-      if (!conn) {
-        return localWrite.execute(id, params, signal, onUpdate);
-      }
-      if (!transport) {
-        return localWrite.execute(id, params, signal, onUpdate);
-      }
+      const { conn, transport } = requireSsh("ssh_write");
       const tool = createWriteTool(localCwd, { operations: createRemoteWriteOps(conn, transport) });
       return tool.execute(id, params, signal, onUpdate);
     },
@@ -1005,14 +1015,11 @@ export default function piSshExtension(pi: ExtensionAPI): void {
 
   pi.registerTool({
     ...localEdit,
+    name: "ssh_edit",
+    label: "ssh_edit",
+    description: `Edit a file on the remote SSH host. ${localEdit.description}`,
     async execute(id, params, signal, onUpdate) {
-      const conn = getConnection();
-      if (!conn) {
-        return localEdit.execute(id, params, signal, onUpdate);
-      }
-      if (!transport) {
-        return localEdit.execute(id, params, signal, onUpdate);
-      }
+      const { conn, transport } = requireSsh("ssh_edit");
       const tool = createEditTool(localCwd, { operations: createRemoteEditOps(conn, transport) });
       return tool.execute(id, params, signal, onUpdate);
     },
@@ -1020,10 +1027,11 @@ export default function piSshExtension(pi: ExtensionAPI): void {
 
   pi.registerTool({
     ...localBash,
+    name: "ssh_bash",
+    label: "ssh_bash",
+    description: `Run a shell command on the remote SSH host. ${localBash.description}`,
     async execute(id, params, signal, onUpdate) {
-      if (!transport) {
-        return localBash.execute(id, params, signal, onUpdate);
-      }
+      const { transport } = requireSsh("ssh_bash");
       const tool = createBashTool(localCwd, { operations: createRemoteBashOps(transport) });
       return tool.execute(id, params, signal, onUpdate);
     },
@@ -1185,11 +1193,21 @@ export default function piSshExtension(pi: ExtensionAPI): void {
     const conn = getConnection();
     if (!conn) return;
 
-    const localPrefix = `Current working directory: ${localCwd}`;
-    const remotePrefix = `Current working directory: ${conn.remoteCwd} (via SSH ${conn.remote}, port ${conn.port ?? "ssh-config/default"})`;
+    // The default read/write/edit/bash tools operate on the LOCAL machine.
+    // Tell the agent that remote work goes through the ssh_* tools and is
+    // rooted at the remote working directory, rather than rewriting the local
+    // cwd line (which would wrongly imply the local tools act remotely).
+    const portLabel = conn.port ?? "ssh-config/default";
+    const guidance =
+      `\n\n# Remote SSH workspace\n\n` +
+      `An SSH connection to ${conn.remote} (port ${portLabel}) is active. ` +
+      `The default read/write/edit/bash tools act on the LOCAL machine. ` +
+      `To inspect or change files on the remote host, use the ssh_read, ssh_write, ssh_edit, and ssh_bash tools. ` +
+      `(User \`!\` commands run on the remote host.) ` +
+      `Remote operations are rooted at the remote working directory ${conn.remoteCwd}; ` +
+      `relative paths passed to ssh_* tools resolve against it, and remote absolute paths are used as-is.`;
 
-    if (!event.systemPrompt.includes(localPrefix)) return;
-    let modified = event.systemPrompt.replace(localPrefix, remotePrefix);
+    let modified = `${event.systemPrompt}${guidance}`;
     if (remoteContextSection) {
       modified += remoteContextSection;
     }
