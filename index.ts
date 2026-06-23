@@ -1,6 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import type { CustomEntry, ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { join } from "node:path";
+import type { CustomEntry, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   createBashTool,
   createEditTool,
@@ -10,7 +13,7 @@ import {
   type EditOperations,
   type ReadOperations,
   type WriteOperations,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 interface SshStoredConfig {
   remote: string;
@@ -52,6 +55,15 @@ interface RunningCommand {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+// Cryptographically strong, unguessable nonce for command/heredoc markers.
+// The remote shell echoes the command (and thus the marker) before output is
+// produced, so a malicious remote that could predict the marker might emit a
+// fake "__PI_SSH_DONE_<nonce>__:0" line to spoof success or truncate output.
+// 128 bits of CSPRNG entropy removes that predictability.
+function generateNonce(): string {
+  return randomBytes(16).toString("hex");
 }
 
 function escapeRegex(value: string): string {
@@ -145,6 +157,15 @@ function findRemotePathSeparator(value: string): number {
   return -1;
 }
 
+// Guard against argv option-injection: ssh treats any argument starting with
+// "-" as an option, so a host like "-oProxyCommand=..." would run a local
+// command. Reject leading dashes; legitimate hosts never start with one.
+function assertSafeRemote(remote: string): void {
+  if (remote.startsWith("-")) {
+    throw new Error(`Invalid SSH remote (must not start with "-"): ${remote}`);
+  }
+}
+
 function parseSshFlag(raw: string): { remote: string; remotePath?: string } {
   const value = raw.trim();
   if (!value) {
@@ -153,6 +174,7 @@ function parseSshFlag(raw: string): { remote: string; remotePath?: string } {
 
   const colonIndex = findRemotePathSeparator(value);
   if (colonIndex === -1) {
+    assertSafeRemote(value);
     return { remote: value };
   }
 
@@ -164,6 +186,7 @@ function parseSshFlag(raw: string): { remote: string; remotePath?: string } {
   if (!remotePath) {
     throw new Error("Invalid --ssh value: empty remote path");
   }
+  assertSafeRemote(remote);
   return { remote, remotePath };
 }
 
@@ -180,6 +203,31 @@ function parseSshPort(raw: string | undefined): number | undefined {
   return parsed;
 }
 
+// Resolve a per-user, non-world-writable directory for the SSH ControlPath
+// socket. A predictable socket in shared /tmp lets other local users probe
+// session existence and invites symlink/race issues, so prefer $XDG_RUNTIME_DIR
+// (already 0700) and fall back to a 0700 dir under $HOME. Computed once and
+// created eagerly; failures fall back to /tmp rather than breaking SSH.
+function resolveControlDir(): string {
+  const candidates = [process.env.XDG_RUNTIME_DIR, homedir() ? join(homedir(), ".ssh") : undefined].filter(
+    (value): value is string => Boolean(value),
+  );
+
+  for (const base of candidates) {
+    const dir = join(base, "pi-ssh");
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      return dir;
+    } catch {
+      // try next candidate
+    }
+  }
+
+  return "/tmp";
+}
+
+const CONTROL_SOCKET_DIR = resolveControlDir();
+
 function buildSshBaseArgs(port?: number): string[] {
   const args: string[] = [];
   if (port !== undefined) {
@@ -187,12 +235,20 @@ function buildSshBaseArgs(port?: number): string[] {
   }
 
   args.push(
+    // Own the security posture explicitly instead of inheriting ambient
+    // ~/.ssh/config: accept-new pins unknown hosts on first use but refuses
+    // changed keys (MITM), and BatchMode prevents a piped, non-interactive
+    // ssh from hanging forever on an auth/host-key prompt.
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "-o",
+    "BatchMode=yes",
     "-o",
     "ControlMaster=auto",
     "-o",
     "ControlPersist=600",
     "-o",
-    "ControlPath=/tmp/pi-ssh-%C",
+    `ControlPath=${join(CONTROL_SOCKET_DIR, "cm-%C")}`,
   );
 
   return args;
@@ -215,7 +271,7 @@ async function sshCapture(
   options: SshCaptureOptions = {},
 ): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number | null; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("ssh", [...buildSshBaseArgs(port), remote, remoteCommand], {
+    const child = spawn("ssh", [...buildSshBaseArgs(port), "--", remote, remoteCommand], {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -333,12 +389,12 @@ class PersistentRemoteShell {
     }
 
     this.startupPromise = new Promise<void>((resolve, reject) => {
-      const child = spawn("ssh", [...buildSshBaseArgs(this.connection.port), "-tt", this.connection.remote], {
+      const child = spawn("ssh", [...buildSshBaseArgs(this.connection.port), "-tt", "--", this.connection.remote], {
         stdio: ["pipe", "pipe", "pipe"],
       });
 
       let settled = false;
-      const startupMarker = `__PI_SSH_READY_${Date.now()}_${Math.random().toString(16).slice(2)}__`;
+      const startupMarker = `__PI_SSH_READY_${generateNonce()}__`;
       const startupStdoutChunks: Buffer[] = [];
       const startupStderrChunks: Buffer[] = [];
 
@@ -584,7 +640,7 @@ class PersistentRemoteShell {
       throw new Error("Failed to start persistent SSH shell");
     }
 
-    const unique = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const unique = generateNonce();
     const startMarker = `__PI_SSH_BEGIN_${unique}__`;
     const endMarker = `__PI_SSH_DONE_${unique}__`;
     const remoteCwd = mapLocalPathToRemote(cwd, this.connection);
@@ -1055,6 +1111,9 @@ export default function piSshExtension(pi: ExtensionAPI): void {
     if (!storedConfig) return;
 
     try {
+      // Persisted config could have been tampered with; re-validate the host
+      // before it reaches the ssh argv.
+      assertSafeRemote(storedConfig.remote);
       connection = {
         remote: storedConfig.remote,
         port: storedConfig.port,
