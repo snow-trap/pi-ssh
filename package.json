@@ -1,7 +1,7 @@
 {
   "name": "pi-ssh",
-  "version": "0.3.2",
-  "description": "pi extension for local-model plus remote SSH workspace tool execution",
+  "version": "0.4.0",
+  "description": "pi extension for local-model plus remote SSH workspace tool execution (pansapiens fork)",
   "type": "module",
   "private": false,
   "main": "index.ts",
@@ -21,15 +21,21 @@
     "ghostty"
   ],
   "author": "Helmut Januschka",
+  "contributors": [
+    "Iliya Anastasov <ilia.anastasov@gmail.com>",
+    "Furkan Bilgin <info@furkanbilgin.net>",
+    "Tim Smith",
+    "Ignas (fairusage)"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hjanuschka/pi-ssh.git"
+    "url": "https://github.com/pansapiens/pi-ssh.git"
   },
   "bugs": {
-    "url": "https://github.com/hjanuschka/pi-ssh/issues"
+    "url": "https://github.com/pansapiens/pi-ssh/issues"
   },
-  "homepage": "https://github.com/hjanuschka/pi-ssh#readme",
+  "homepage": "https://github.com/pansapiens/pi-ssh#readme",
   "pi": {
     "extensions": [
       "./index.ts"
