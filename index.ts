@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir } from "node:os";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { CustomEntry, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   createBashTool,
   createEditTool,
@@ -11,6 +11,13 @@ import {
   type ReadOperations,
   type WriteOperations,
 } from "@mariozechner/pi-coding-agent";
+
+interface SshStoredConfig {
+  remote: string;
+  port?: number;
+  remoteCwd: string;
+  remoteHome: string;
+}
 
 interface SshConnection {
   remote: string;
@@ -365,7 +372,8 @@ class PersistentRemoteShell {
           return;
         }
         if (this.running) {
-          this.running.reject(new Error("SSH shell closed unexpectedly"));
+          const reason = this.running.aborted ? "Command aborted" : "SSH shell closed unexpectedly";
+          this.running.reject(new Error(reason));
           this.cleanupRunning();
         }
         this.child = null;
@@ -392,7 +400,7 @@ class PersistentRemoteShell {
 
       this.child = child;
       this.child.stdin.write(
-        "stty -echo 2>/dev/null || true; unset PROMPT_COMMAND 2>/dev/null || true; PS1=''; PS2=''; PROMPT=''; RPROMPT=''; " +
+        "HISTFILE=/dev/null; trap '' INT; stty -echo 2>/dev/null || true; unset PROMPT_COMMAND 2>/dev/null || true; PS1=''; PS2=''; PROMPT=''; RPROMPT=''; " +
           "export PAGER=cat; export GIT_PAGER=cat; export GIT_TERMINAL_PROMPT=0; " +
           "if [ -n \"${ZSH_VERSION-}\" ]; then precmd_functions=(); preexec_functions=(); chpwd_functions=(); unset zle_bracketed_paste 2>/dev/null || true; fi; " +
           "if [ -n \"${BASH_VERSION-}\" ]; then bind 'set enable-bracketed-paste off' 2>/dev/null || true; fi; " +
@@ -548,9 +556,22 @@ class PersistentRemoteShell {
 
   private interruptCurrentCommand(): void {
     if (!this.child || this.child.killed) return;
-    // Send Ctrl-C to remote TTY; this interrupts the foreground command
-    // but keeps the SSH shell session alive.
-    this.child.stdin.write("\x03");
+    // Mark the running command as aborted so the close handler reports
+    // "Command aborted" instead of "SSH shell closed unexpectedly".
+    if (this.running) {
+      this.running.aborted = true;
+    }
+    // Kill the SSH connection entirely. The close event fires, rejecting
+    // the running promise. The next execOne() reconnects via ensureStarted().
+    //
+    // Sending \x03 through the PTY (Ctrl-C) is unreliable because:
+    // - stdin is a pipe, not a terminal, so the SSH client may buffer or
+    //   mishandle the byte
+    // - the remote PTY's ISIG flag might be off
+    // - the remote shell's SIGINT handling might not propagate to the child
+    // Killing the SSH process is guaranteed to terminate the remote session
+    // (SIGHUP through the PTY cleans up child processes on the remote side).
+    this.child.kill("SIGTERM");
   }
 
   private async execOne(
@@ -574,19 +595,22 @@ class PersistentRemoteShell {
     // because the pipe overrides stdin for downstream commands.
     //
     // If the command contains newlines (e.g. multi-line git commit -m "..."),
-    // base64-encode it so the entire wrapper stays on a single PTY line.
-    // Otherwise the PTY interprets embedded newlines as separate command
-    // submissions and the end marker is never reached, hanging the session.
-    const needsEncoding = command.includes("\n");
-    const execPart = needsEncoding
-      ? `eval "$(printf '%s' '${Buffer.from(command).toString("base64")}' | base64 -d)"`
-      : `{ ${command}; }`;
-
+    // a heredoc is used so the PTY sees the command as multi-line input
+    // rather than separate command submissions. This avoids base64+eval
+    // encoding entirely.
+    const heredocMarker = `__PI_SSH_EOF_${unique}__`;
     const wrappedCommand = [
       `printf '${startMarker}\\n'`,
-      `if cd -- ${shellQuote(remoteCwd)}; then ${execPart} </dev/null; __pi_ec=$?; else __pi_ec=$?; fi`,
-      `printf '\\n${endMarker}:%s\\n' \"$__pi_ec\"`,
-    ].join("; ");
+      `if cd -- ${shellQuote(remoteCwd)}; then`,
+      `  bash <<'${heredocMarker}'`,
+      `{ ${command}; } </dev/null`,
+      heredocMarker,
+      `  __pi_ec=$?`,
+      `else`,
+      `  __pi_ec=$?`,
+      `fi`,
+      `printf '\\n${endMarker}:%s\\n' "$__pi_ec"`,
+    ].join("\n");
 
     // Reset incremental streaming state for the new command
     this.streamedBytes = 0;
@@ -949,24 +973,106 @@ export default function piSshExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     const flag = pi.getFlag("ssh") as string | undefined;
-    if (!flag) return;
+
+    if (flag) {
+      // Priority 1: --ssh flag (new connection from user)
+      try {
+        const rawPort = (pi.getFlag("p") as string | undefined) ?? (pi.getFlag("ssh-port") as string | undefined);
+        const port = parseSshPort(rawPort);
+        connection = await resolveSshConnection(flag, localCwd, localHome, port);
+        transport = new SshTransport(connection);
+
+        // Persist config in session so /resume can re-establish the connection
+        pi.appendEntry("pi-ssh-config", {
+          remote: connection.remote,
+          port: connection.port,
+          remoteCwd: connection.remoteCwd,
+          remoteHome: connection.remoteHome,
+        } satisfies SshStoredConfig);
+
+        const enabledMessage = `pi-ssh enabled: ${connection.remote}:${connection.remoteCwd} (port ${connection.port})`;
+        console.log(enabledMessage);
+        if (ctx.hasUI) {
+          ctx.ui.setStatus(
+            "pi-ssh",
+            ctx.ui.theme.fg("accent", `SSH ${connection.remote}:${connection.remoteCwd} (port ${connection.port})`),
+          );
+          ctx.ui.notify(enabledMessage, "info");
+        }
+
+        // Load remote context file (AGENTS.md or CLAUDE.md) from remote cwd
+        try {
+          for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+            try {
+              const content = (await transport.readFile(`${connection.remoteCwd}/${name}`)).toString("utf-8").trim();
+              if (content) {
+                remoteContextSection = `\n\n# Remote Project Context\n\n## ${connection.remoteCwd}/${name}\n\n${content}\n`;
+                if (ctx.hasUI) {
+                  ctx.ui.notify(`Loaded remote context file: ${name}`, "info");
+                }
+                break;
+              }
+            } catch {
+              // not found, try next
+            }
+          }
+        } catch {
+          // skip context loading on error
+        }
+
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        connection = null;
+        if (transport) {
+          await transport.dispose();
+          transport = null;
+        }
+        console.error(`pi-ssh failed to connect: ${message}`);
+        if (ctx.hasUI) {
+          ctx.ui.setStatus("pi-ssh", undefined);
+          ctx.ui.notify(`pi-ssh failed to connect: ${message}`, "error");
+        }
+        throw error;
+      }
+    }
+
+    // Priority 2: Stored SSH config from previous session (resume support)
+    if (event.reason !== "startup" && event.reason !== "resume") return;
+
+    const entries = ctx.sessionManager.getEntries();
+    let storedConfig: SshStoredConfig | undefined;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.type === "custom" && (e as CustomEntry<unknown>).customType === "pi-ssh-config") {
+        storedConfig = (e as CustomEntry<SshStoredConfig>).data;
+        if (storedConfig) break;
+      }
+    }
+
+    if (!storedConfig) return;
 
     try {
-      const rawPort = (pi.getFlag("p") as string | undefined) ?? (pi.getFlag("ssh-port") as string | undefined);
-      const port = parseSshPort(rawPort);
-      connection = await resolveSshConnection(flag, localCwd, localHome, port);
+      connection = {
+        remote: storedConfig.remote,
+        port: storedConfig.port,
+        remoteCwd: storedConfig.remoteCwd,
+        remoteHome: storedConfig.remoteHome,
+        localCwd,
+        localHome,
+      };
       transport = new SshTransport(connection);
       const portLabel = connection.port ?? "ssh-config/default";
-      const enabledMessage = `pi-ssh enabled: ${connection.remote}:${connection.remoteCwd} (port ${portLabel})`;
-      console.log(enabledMessage);
+      const resumeMessage = `pi-ssh resumed: ${connection.remote}:${connection.remoteCwd} (port ${portLabel})`;
+      console.log(resumeMessage);
       if (ctx.hasUI) {
         ctx.ui.setStatus(
           "pi-ssh",
           ctx.ui.theme.fg("accent", `SSH ${connection.remote}:${connection.remoteCwd} (port ${portLabel})`),
         );
-        ctx.ui.notify(enabledMessage, "info");
+        ctx.ui.notify(resumeMessage, "info");
       }
 
       // Load remote context file (AGENTS.md or CLAUDE.md) from remote cwd
@@ -995,12 +1101,12 @@ export default function piSshExtension(pi: ExtensionAPI): void {
         await transport.dispose();
         transport = null;
       }
-      console.error(`pi-ssh failed to connect: ${message}`);
+      console.error(`pi-ssh resume failed: ${message}`);
       if (ctx.hasUI) {
         ctx.ui.setStatus("pi-ssh", undefined);
-        ctx.ui.notify(`pi-ssh failed to connect: ${message}`, "error");
+        ctx.ui.notify(`pi-ssh resume failed: ${message}`, "warning");
       }
-      throw error;
+      // Local mode fallback — don't throw, user can still browse the conversation
     }
   });
 

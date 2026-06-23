@@ -8,6 +8,16 @@ Run pi locally, work on files remotely over SSH.
 - model access, API keys, and billing stay local
 - `read`, `write`, `edit`, and `bash` run on a remote host via SSH
 
+This is a **fork** with several fixes and improvements over the original.
+
+## Fork improvements
+
+- **No `.bash_history` pollution** — `HISTFILE=/dev/null` is set in the persistent shell init, so remote commands (marker lines, `cd`, the actual commands you send) never get written to the remote user's shell history. The original version wrote entries like `eval "$(printf '%s' ...| base64 -d)"` and `printf '__PI_SSH_BEGIN_...__\n'` to `.bash_history`.
+- **No eval, no remote base64** — Multi-line commands now use a heredoc (`bash <<'EOF'`) instead of base64-encoding plus `eval`. This avoids eval entirely, removes the dependency on `base64` being present on the remote host, and makes debugging easier since commands appear verbatim.
+- **SSH resume on `/resume`** — SSH connection parameters are persisted in the session via `pi.appendEntry()`. When you run `pi` elsewhere and `/resume` an SSH session, the extension automatically reconnects to the remote host. No need to re-pass `--ssh` on resume.
+  - Resume failures (unreachable host, network change) show a warning instead of crashing — you still get local mode to browse the conversation.
+- **Ctrl-C / Escape cancel actually works** — Pressing Escape to cancel a running remote command now kills the SSH connection, which reliably terminates the remote session (SIGHUP through the PTY cleans up child processes). The original version sent `\x03` (Ctrl-C byte) through a pipe-connected SSH stdin, which was unreliable — the byte often didn't reach the remote process because stdin was a pipe, not a terminal. On the next command, the extension reconnects automatically.
+
 ## Why
 
 This is useful when:
@@ -29,10 +39,13 @@ This is useful when:
 - Persistent remote shell session for bash commands
   - uses your remote account's configured login shell (for example zsh)
   - environment persists across commands (for example `export TEST=123`)
-  - Ctrl-C interrupts the current remote command but keeps the SSH session alive
+  - Ctrl-C interrupts the current remote command but keeps the SSH shell alive
+  - **No `.bash_history` pollution** — `HISTFILE=/dev/null` on the remote shell
 - Remote execution for user `!` commands
 - Status indicator in the pi UI when SSH mode is active
 - System prompt cwd rewrite to reflect remote cwd
+- **Session resume** — `/resume` an SSH session and the extension reconnects automatically
+- **Ctrl-C cancel works** — Escape properly interrupts the remote command without hanging
 
 ## Requirements
 
