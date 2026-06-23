@@ -8,15 +8,8 @@ Run pi locally, work on files remotely over SSH.
 - model access, API keys, and billing stay local
 - `read`, `write`, `edit`, and `bash` run on a remote host via SSH
 
-This is a **fork** with several fixes and improvements over the original.
-
-## Fork improvements
-
-- **No `.bash_history` pollution** — `HISTFILE=/dev/null` is set in the persistent shell init, so remote commands (marker lines, `cd`, the actual commands you send) never get written to the remote user's shell history. The original version wrote entries like `eval "$(printf '%s' ...| base64 -d)"` and `printf '__PI_SSH_BEGIN_...__\n'` to `.bash_history`.
-- **No eval, no remote base64** — Multi-line commands now use a heredoc (`bash <<'EOF'`) instead of base64-encoding plus `eval`. This avoids eval entirely, removes the dependency on `base64` being present on the remote host, and makes debugging easier since commands appear verbatim.
-- **SSH resume on `/resume`** — SSH connection parameters are persisted in the session via `pi.appendEntry()`. When you run `pi` elsewhere and `/resume` an SSH session, the extension automatically reconnects to the remote host. No need to re-pass `--ssh` on resume.
-  - Resume failures (unreachable host, network change) show a warning instead of crashing — you still get local mode to browse the conversation.
-- **Ctrl-C / Escape cancel actually works** — Pressing Escape to cancel a running remote command now kills the SSH connection, which reliably terminates the remote session (SIGHUP through the PTY cleans up child processes). The original version sent `\x03` (Ctrl-C byte) through a pipe-connected SSH stdin, which was unreliable — the byte often didn't reach the remote process because stdin was a pipe, not a terminal. On the next command, the extension reconnects automatically.
+This is a **fork** with several fixes and improvements over the original — see
+[Fork improvements](#fork-improvements) below.
 
 ## Why
 
@@ -153,6 +146,18 @@ ssh user@host 'which cat test mkdir pwd'
 
 `bash`/`!` and most `read`/`write`/`edit` operations use a shared persistent SSH session.
 Very large writes fall back to one-shot SSH streaming for reliability.
+
+## Fork improvements
+
+This is a fork of [hjanuschka/pi-ssh](https://github.com/hjanuschka/pi-ssh) with
+the following fixes and improvements over the original:
+
+- **No `.bash_history` pollution** — `HISTFILE=/dev/null` is set in the persistent shell init, so remote commands (marker lines, `cd`, the actual commands you send) never get written to the remote user's shell history. The original version wrote entries like `eval "$(printf '%s' ...| base64 -d)"` and `printf '__PI_SSH_BEGIN_...__\n'` to `.bash_history`.
+- **No eval, no remote base64** — Multi-line commands now use a heredoc (`bash <<'EOF'`) instead of base64-encoding plus `eval`. This avoids eval entirely, removes the dependency on `base64` being present on the remote host, and makes debugging easier since commands appear verbatim.
+- **SSH resume on `/resume`** — SSH connection parameters are persisted in the session via `pi.appendEntry()`. When you run `pi` elsewhere and `/resume` an SSH session, the extension automatically reconnects to the remote host. No need to re-pass `--ssh` on resume.
+  - Resume failures (unreachable host, network change) show a warning instead of crashing — you still get local mode to browse the conversation.
+- **Ctrl-C / Escape cancel actually works** — Pressing Escape to cancel a running remote command now kills the SSH connection, which reliably terminates the remote session (SIGHUP through the PTY cleans up child processes). The original version sent `\x03` (Ctrl-C byte) through a pipe-connected SSH stdin, which was unreliable — the byte often didn't reach the remote process because stdin was a pipe, not a terminal. On the next command, the extension reconnects automatically.
+- **Security hardening** — non-world-writable control socket, explicit `StrictHostKeyChecking=accept-new` / `BatchMode=yes`, argv option-injection guards, and CSPRNG marker nonces (see [Security model](#security-model)).
 
 ## Development
 
