@@ -148,6 +148,20 @@ Use Option A as the first publishable OSS cut.
 If path is omitted, remote cwd is detected with `pwd`.
 If no port override is provided, `pi-ssh` defers to normal OpenSSH resolution, including matching `~/.ssh/config` `Host` entries and the SSH default port.
 
+### `/ssh` command
+
+Connecting at startup is optional; the same connection can be established
+mid-session from the prompt:
+
+- `/ssh` — pick a `Host` from `~/.ssh/config`
+- `/ssh user@host[:/path] [port]` — connect (optional trailing port override)
+- `/ssh status` — show the active connection
+- `/ssh off` — disconnect and return to local-only tools
+
+The command shares the startup connection path (resolve → transport → persist
+for resume → status → remote context), so resume works regardless of how the
+connection was established.
+
 ## Tool behavior details
 
 ### read

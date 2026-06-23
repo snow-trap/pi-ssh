@@ -21,7 +21,8 @@ This is useful when:
 
 ## Features
 
-- `--ssh user@host` or `--ssh user@host:/remote/path`
+- `--ssh user@host` or `--ssh user@host:/remote/path` at startup
+- `/ssh` command to connect, switch, or disconnect mid-session (no `--ssh` needed)
 - optional port override: `--ssh-port 2222` (alias: `-p 2222`)
 - Dedicated remote tools that the agent uses for remote work:
   - `ssh_read`
@@ -94,9 +95,27 @@ You should see a status line similar to:
 SSH user@my-vm:/home/user/chromium/src (port ssh-config/default)
 ```
 
+### Connect from the prompt with `/ssh`
+
+You don't have to decide at startup. Run `/ssh` mid-session to connect, switch,
+or disconnect — no `--ssh` flag required:
+
+```text
+/ssh                       pick a host from ~/.ssh/config
+/ssh my-vm                 connect to a ~/.ssh/config host (or user@host)
+/ssh user@my-vm:/path      connect with an explicit remote workspace path
+/ssh user@my-vm:/path 2222 optional trailing port override
+/ssh status                show the active connection
+/ssh off                   disconnect (local tools only)
+```
+
+`/ssh` with no arguments offers the `Host` entries from your `~/.ssh/config`.
+Connecting mid-session immediately enables the `ssh_*` tools; `/ssh off` tears
+the connection down and leaves only the local tools.
+
 ## Typical workflow
 
-1. Start pi locally with `--ssh ...`
+1. Start pi locally (optionally with `--ssh ...`, or connect later with `/ssh`)
 2. Ask pi to inspect/edit files on the remote — the agent uses the `ssh_*` tools
 3. Use `!` for quick remote shell commands
 4. Keep local model switching, auth, and limits as usual
@@ -165,6 +184,7 @@ the following fixes and improvements over the original:
 - **Ctrl-C / Escape cancel actually works** — Pressing Escape to cancel a running remote command now kills the SSH connection, which reliably terminates the remote session (SIGHUP through the PTY cleans up child processes). The original version sent `\x03` (Ctrl-C byte) through a pipe-connected SSH stdin, which was unreliable — the byte often didn't reach the remote process because stdin was a pipe, not a terminal. On the next command, the extension reconnects automatically.
 - **Security hardening** — non-world-writable control socket, explicit `StrictHostKeyChecking=accept-new` / `BatchMode=yes`, argv option-injection guards, and CSPRNG marker nonces (see [Security model](#security-model)).
 - **Coexists with other tool extensions** — registers dedicated `ssh_read`/`ssh_write`/`ssh_edit`/`ssh_bash` tools instead of overriding the built-in `read`/`write`/`edit`/`bash`. The original overrode the built-ins, which fails to load alongside any extension that also owns those names (e.g. `pi-read-map`, `pi-sandbox`).
+- **`/ssh` command** — connect, switch, or disconnect from a remote mid-session without restarting pi or passing `--ssh`, with a `~/.ssh/config` host picker (style inspired by [`pi-ssh-tools`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-ssh-tools)).
 
 ## Development
 

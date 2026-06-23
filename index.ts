@@ -1,9 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { CustomEntry, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   createBashTool,
   createEditTool,
@@ -188,6 +188,29 @@ function parseSshFlag(raw: string): { remote: string; remotePath?: string } {
   }
   assertSafeRemote(remote);
   return { remote, remotePath };
+}
+
+// Parse `Host` aliases from ~/.ssh/config for the `/ssh` picker and argument
+// completions. Wildcard / negated patterns are skipped — they aren't directly
+// connectable targets.
+function readSshConfigHosts(): string[] {
+  let text: string;
+  try {
+    text = readFileSync(join(homedir(), ".ssh", "config"), "utf-8");
+  } catch {
+    return [];
+  }
+
+  const hosts: string[] = [];
+  for (const line of text.split("\n")) {
+    const match = /^\s*Host\s+(.+?)\s*$/i.exec(line);
+    if (!match) continue;
+    for (const token of match[1].split(/\s+/)) {
+      if (!token || token.includes("*") || token.includes("?") || token.startsWith("!")) continue;
+      if (!hosts.includes(token)) hosts.push(token);
+    }
+  }
+  return hosts;
 }
 
 function parseSshPort(raw: string | undefined): number | undefined {
@@ -983,10 +1006,78 @@ export default function piSshExtension(pi: ExtensionAPI): void {
     const conn = getConnection();
     if (!conn || !transport) {
       throw new Error(
-        `${toolName} requires an active SSH connection. Start pi with --ssh user@host[:/path] (or resume an SSH session).`,
+        `${toolName} requires an active SSH connection. Start pi with --ssh user@host[:/path], or run /ssh, or resume an SSH session.`,
       );
     }
     return { conn, transport };
+  };
+
+  // Load AGENTS.md / CLAUDE.md from the remote cwd into the system-prompt
+  // section. Shared by startup, resume, and the /ssh command.
+  const loadRemoteContext = async (ctx: ExtensionContext): Promise<void> => {
+    remoteContextSection = "";
+    if (!connection || !transport) return;
+    try {
+      for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+        try {
+          const content = (await transport.readFile(`${connection.remoteCwd}/${name}`)).toString("utf-8").trim();
+          if (content) {
+            remoteContextSection = `\n\n# Remote Project Context\n\n## ${connection.remoteCwd}/${name}\n\n${content}\n`;
+            if (ctx.hasUI) ctx.ui.notify(`Loaded remote context file: ${name}`, "info");
+            break;
+          }
+        } catch {
+          // not found, try next
+        }
+      }
+    } catch {
+      // skip context loading on error
+    }
+  };
+
+  // Establish a connection from a resolved SshConnection, wiring up the
+  // transport, optional resume persistence, status line, and remote context.
+  const activateConnection = async (
+    conn: SshConnection,
+    ctx: ExtensionContext,
+    opts: { persist: boolean; verb: string },
+  ): Promise<void> => {
+    if (transport) {
+      await transport.dispose();
+      transport = null;
+    }
+    connection = conn;
+    transport = new SshTransport(conn);
+
+    if (opts.persist) {
+      // Persist config in session so /resume can re-establish the connection.
+      pi.appendEntry("pi-ssh-config", {
+        remote: conn.remote,
+        port: conn.port,
+        remoteCwd: conn.remoteCwd,
+        remoteHome: conn.remoteHome,
+      } satisfies SshStoredConfig);
+    }
+
+    const portLabel = conn.port ?? "ssh-config/default";
+    const message = `pi-ssh ${opts.verb}: ${conn.remote}:${conn.remoteCwd} (port ${portLabel})`;
+    console.log(message);
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("pi-ssh", ctx.ui.theme.fg("accent", `SSH ${conn.remote}:${conn.remoteCwd} (port ${portLabel})`));
+      ctx.ui.notify(message, "info");
+    }
+
+    await loadRemoteContext(ctx);
+  };
+
+  const deactivateConnection = async (ctx: ExtensionContext): Promise<void> => {
+    if (transport) {
+      await transport.dispose();
+      transport = null;
+    }
+    connection = null;
+    remoteContextSection = "";
+    if (ctx.hasUI) ctx.ui.setStatus("pi-ssh", undefined);
   };
 
   pi.registerTool({
@@ -1045,60 +1136,14 @@ export default function piSshExtension(pi: ExtensionAPI): void {
       try {
         const rawPort = (pi.getFlag("p") as string | undefined) ?? (pi.getFlag("ssh-port") as string | undefined);
         const port = parseSshPort(rawPort);
-        connection = await resolveSshConnection(flag, localCwd, localHome, port);
-        transport = new SshTransport(connection);
-
-        // Persist config in session so /resume can re-establish the connection
-        pi.appendEntry("pi-ssh-config", {
-          remote: connection.remote,
-          port: connection.port,
-          remoteCwd: connection.remoteCwd,
-          remoteHome: connection.remoteHome,
-        } satisfies SshStoredConfig);
-
-        const enabledMessage = `pi-ssh enabled: ${connection.remote}:${connection.remoteCwd} (port ${connection.port})`;
-        console.log(enabledMessage);
-        if (ctx.hasUI) {
-          ctx.ui.setStatus(
-            "pi-ssh",
-            ctx.ui.theme.fg("accent", `SSH ${connection.remote}:${connection.remoteCwd} (port ${connection.port})`),
-          );
-          ctx.ui.notify(enabledMessage, "info");
-        }
-
-        // Load remote context file (AGENTS.md or CLAUDE.md) from remote cwd
-        try {
-          for (const name of ["AGENTS.md", "CLAUDE.md"]) {
-            try {
-              const content = (await transport.readFile(`${connection.remoteCwd}/${name}`)).toString("utf-8").trim();
-              if (content) {
-                remoteContextSection = `\n\n# Remote Project Context\n\n## ${connection.remoteCwd}/${name}\n\n${content}\n`;
-                if (ctx.hasUI) {
-                  ctx.ui.notify(`Loaded remote context file: ${name}`, "info");
-                }
-                break;
-              }
-            } catch {
-              // not found, try next
-            }
-          }
-        } catch {
-          // skip context loading on error
-        }
-
+        const conn = await resolveSshConnection(flag, localCwd, localHome, port);
+        await activateConnection(conn, ctx, { persist: true, verb: "enabled" });
         return;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        connection = null;
-        if (transport) {
-          await transport.dispose();
-          transport = null;
-        }
+        await deactivateConnection(ctx);
         console.error(`pi-ssh failed to connect: ${message}`);
-        if (ctx.hasUI) {
-          ctx.ui.setStatus("pi-ssh", undefined);
-          ctx.ui.notify(`pi-ssh failed to connect: ${message}`, "error");
-        }
+        if (ctx.hasUI) ctx.ui.notify(`pi-ssh failed to connect: ${message}`, "error");
         throw error;
       }
     }
@@ -1122,7 +1167,7 @@ export default function piSshExtension(pi: ExtensionAPI): void {
       // Persisted config could have been tampered with; re-validate the host
       // before it reaches the ssh argv.
       assertSafeRemote(storedConfig.remote);
-      connection = {
+      const conn: SshConnection = {
         remote: storedConfig.remote,
         port: storedConfig.port,
         remoteCwd: storedConfig.remoteCwd,
@@ -1130,51 +1175,88 @@ export default function piSshExtension(pi: ExtensionAPI): void {
         localCwd,
         localHome,
       };
-      transport = new SshTransport(connection);
-      const portLabel = connection.port ?? "ssh-config/default";
-      const resumeMessage = `pi-ssh resumed: ${connection.remote}:${connection.remoteCwd} (port ${portLabel})`;
-      console.log(resumeMessage);
-      if (ctx.hasUI) {
-        ctx.ui.setStatus(
-          "pi-ssh",
-          ctx.ui.theme.fg("accent", `SSH ${connection.remote}:${connection.remoteCwd} (port ${portLabel})`),
-        );
-        ctx.ui.notify(resumeMessage, "info");
-      }
-
-      // Load remote context file (AGENTS.md or CLAUDE.md) from remote cwd
-      try {
-        for (const name of ["AGENTS.md", "CLAUDE.md"]) {
-          try {
-            const content = (await transport.readFile(`${connection.remoteCwd}/${name}`)).toString("utf-8").trim();
-            if (content) {
-              remoteContextSection = `\n\n# Remote Project Context\n\n## ${connection.remoteCwd}/${name}\n\n${content}\n`;
-              if (ctx.hasUI) {
-                ctx.ui.notify(`Loaded remote context file: ${name}`, "info");
-              }
-              break;
-            }
-          } catch {
-            // not found, try next
-          }
-        }
-      } catch {
-        // skip context loading on error
-      }
+      await activateConnection(conn, ctx, { persist: false, verb: "resumed" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      connection = null;
-      if (transport) {
-        await transport.dispose();
-        transport = null;
-      }
+      await deactivateConnection(ctx);
       console.error(`pi-ssh resume failed: ${message}`);
-      if (ctx.hasUI) {
-        ctx.ui.setStatus("pi-ssh", undefined);
-        ctx.ui.notify(`pi-ssh resume failed: ${message}`, "warning");
-      }
+      if (ctx.hasUI) ctx.ui.notify(`pi-ssh resume failed: ${message}`, "warning");
       // Local mode fallback — don't throw, user can still browse the conversation
     }
+  });
+
+  // /ssh — connect to (or disconnect from) a remote host mid-session, without
+  // requiring --ssh at startup. Mirrors the pi-ssh-tools UX:
+  //   /ssh                      pick a host from ~/.ssh/config
+  //   /ssh user@host[:/path]    connect (optional trailing port: ... 2222)
+  //   /ssh status               show the active connection
+  //   /ssh off                  disconnect
+  pi.registerCommand("ssh", {
+    description: "Connect SSH remote tools: /ssh [user@host[:/path] [port]], /ssh status, /ssh off",
+    getArgumentCompletions: (prefix) => {
+      const options = ["off", "status", ...readSshConfigHosts()];
+      const filtered = options.filter((option) => option.startsWith(prefix));
+      return filtered.length > 0 ? filtered.map((option) => ({ value: option, label: option })) : null;
+    },
+    handler: async (args, ctx) => {
+      const input = args.trim();
+
+      if (input === "status") {
+        if (!connection) {
+          ctx.ui.notify("pi-ssh: not connected (local tools active)", "info");
+          return;
+        }
+        const portLabel = connection.port ?? "ssh-config/default";
+        ctx.ui.notify(`pi-ssh: ${connection.remote}:${connection.remoteCwd} (port ${portLabel})`, "info");
+        return;
+      }
+
+      if (input === "off") {
+        if (!connection) {
+          ctx.ui.notify("pi-ssh: already off", "info");
+          return;
+        }
+        await deactivateConnection(ctx);
+        ctx.ui.notify("pi-ssh: disconnected", "info");
+        return;
+      }
+
+      let target = input;
+      let port: number | undefined;
+
+      if (!target) {
+        const hosts = readSshConfigHosts();
+        if (hosts.length === 0) {
+          ctx.ui.notify("No hosts in ~/.ssh/config. Use /ssh user@host[:/path]", "warning");
+          return;
+        }
+        const items = [...(connection ? ["off"] : []), ...hosts];
+        const picked = await ctx.ui.select("SSH target", items);
+        if (!picked) return;
+        if (picked === "off") {
+          await deactivateConnection(ctx);
+          ctx.ui.notify("pi-ssh: disconnected", "info");
+          return;
+        }
+        target = picked;
+      } else {
+        // Allow an optional trailing port: "/ssh user@host[:/path] 2222"
+        const parts = target.split(/\s+/);
+        if (parts.length > 1 && /^\d+$/.test(parts[parts.length - 1])) {
+          port = parseSshPort(parts.pop());
+          target = parts.join(" ");
+        }
+      }
+
+      try {
+        const conn = await resolveSshConnection(target, localCwd, localHome, port);
+        await activateConnection(conn, ctx, { persist: true, verb: "connected" });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await deactivateConnection(ctx);
+        ctx.ui.notify(`pi-ssh: failed to connect: ${message}`, "error");
+      }
+    },
   });
 
   pi.on("session_shutdown", async () => {
