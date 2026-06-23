@@ -112,6 +112,24 @@ SSH user@my-vm:/home/user/chromium/src (port ssh-config/default)
 - If `--ssh` is not set, extension falls back to local tool behavior.
 - Current version focuses on core coding tools (`read/write/edit/bash`).
 
+## Security model
+
+`pi-ssh` assumes **you trust the remote host you connect to**. In particular:
+
+- Tool operations (`read`/`write`/`edit`/`bash`) and your `!` commands execute
+  on the remote with your remote credentials. Only `--ssh` to hosts you control
+  or trust.
+- A remote `AGENTS.md` or `CLAUDE.md` in the remote cwd is loaded and injected
+  into the agent's system prompt as project instructions — exactly as the local
+  equivalents are. This means a **malicious remote repo can influence the agent
+  via those files** (prompt injection). Treat the remote project as you would
+  any code you run: don't point `pi-ssh` at untrusted hosts or repos.
+- Host keys use `StrictHostKeyChecking=accept-new` (unknown hosts are pinned on
+  first connect; a changed key is refused as a possible MITM).
+- The SSH control socket lives in a per-user `0700` directory
+  (`$XDG_RUNTIME_DIR/pi-ssh`, falling back to `~/.ssh/pi-ssh`), not in shared
+  `/tmp`.
+
 ## Troubleshooting
 
 ### "pi-ssh failed to connect"
