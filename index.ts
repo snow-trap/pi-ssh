@@ -1108,18 +1108,32 @@ export default function piSshExtension(pi: ExtensionAPI): void {
     const message = `pi-ssh ${opts.verb}: ${conn.remote}:${conn.remoteCwd} (port ${portLabel})`;
     console.log(message);
     if (ctx.hasUI) {
-      ctx.ui.setStatus("pi-ssh", ctx.ui.theme.fg("accent", formatStatusText(conn, portLabel)));
+      const renderStatus = () => ctx.ui.setStatus("pi-ssh", ctx.ui.theme.fg("accent", formatStatusText(conn, portLabel)));
+      renderStatus();
       ctx.ui.notify(message, "info");
+
+      // Re-render the status when the terminal is resized so the adaptive
+      // text picks the right detail level for the new width.
+      detachResizeListener();
+      resizeListener = renderStatus;
+      process.stdout.on("resize", renderStatus);
     }
 
     await loadRemoteContext(ctx);
   };
 
+  let resizeListener: (() => void) | undefined;
+  const detachResizeListener = () => {
+    if (resizeListener) {
+      process.stdout.off("resize", resizeListener);
+      resizeListener = undefined;
+    }
+  };
+
 // Status-line text adapts to terminal width so the SSH entry is the first
 // footer item to shrink on narrow terminals: path/port details are dropped
-// before the host name, and $HOME is always collapsed to "~".
-// Note: computed at connection time; resizing the terminal afterwards does
-// not re-render it until the next connect/resume.
+// before the host name, and $HOME is always collapsed to "~". A resize
+// listener re-renders it when the terminal width changes.
 function formatStatusText(conn: SshConnection, portLabel: string | number): string {
   const cols = process.stdout.columns ?? 80;
   const cwd = conn.remoteHome && conn.remoteCwd.startsWith(conn.remoteHome)
@@ -1140,6 +1154,7 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
     }
     connection = null;
     remoteContextSection = "";
+    detachResizeListener();
     if (ctx.hasUI) ctx.ui.setStatus("pi-ssh", undefined);
   };
 
@@ -1340,6 +1355,7 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
   });
 
   pi.on("session_shutdown", async () => {
+    detachResizeListener();
     if (transport) {
       await transport.dispose();
       transport = null;
