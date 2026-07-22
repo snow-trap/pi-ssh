@@ -682,7 +682,12 @@ class PersistentRemoteShell {
       `printf '${startMarker}\\n'`,
       `if cd -- ${shellQuote(remoteCwd)}; then`,
       `  bash <<'${heredocMarker}'`,
-      `{ ${command}; } </dev/null`,
+      // Keep the command on its own lines. Appending `; }` directly to a
+      // command that ends with a heredoc changes its terminator from (for
+      // example) `PY` to `PY; }`, so bash never recognizes the terminator.
+      "{",
+      command,
+      "} </dev/null",
       heredocMarker,
       `  __pi_ec=$?`,
       `else`,
