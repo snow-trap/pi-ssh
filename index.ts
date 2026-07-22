@@ -170,8 +170,22 @@ function assertSafeRemote(remote: string): void {
   }
 }
 
+// Expand $VAR / ${VAR} against process.env so both --ssh and /ssh accept
+// inputs like $JOB_NAME:$REMOTE_PWD. Undefined variables are an error rather
+// than silently becoming an empty host/path.
+function expandEnvVars(value: string): string {
+  return value.replace(/\$(\w+)|\$\{(\w+)\}/g, (match, plain: string | undefined, braced: string | undefined) => {
+    const name = plain ?? braced ?? "";
+    const resolved = process.env[name];
+    if (resolved === undefined) {
+      throw new Error(`Environment variable $${name} is not set`);
+    }
+    return resolved;
+  });
+}
+
 function parseSshFlag(raw: string): { remote: string; remotePath?: string } {
-  const value = raw.trim();
+  const value = expandEnvVars(raw.trim());
   if (!value) {
     throw new Error("--ssh requires a value like user@host or user@host:/remote/path");
   }
