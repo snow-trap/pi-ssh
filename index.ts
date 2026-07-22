@@ -1108,12 +1108,30 @@ export default function piSshExtension(pi: ExtensionAPI): void {
     const message = `pi-ssh ${opts.verb}: ${conn.remote}:${conn.remoteCwd} (port ${portLabel})`;
     console.log(message);
     if (ctx.hasUI) {
-      ctx.ui.setStatus("pi-ssh", ctx.ui.theme.fg("accent", `SSH ${conn.remote}:${conn.remoteCwd} (port ${portLabel})`));
+      ctx.ui.setStatus("pi-ssh", ctx.ui.theme.fg("accent", formatStatusText(conn, portLabel)));
       ctx.ui.notify(message, "info");
     }
 
     await loadRemoteContext(ctx);
   };
+
+// Status-line text adapts to terminal width so the SSH entry is the first
+// footer item to shrink on narrow terminals: path/port details are dropped
+// before the host name, and $HOME is always collapsed to "~".
+// Note: computed at connection time; resizing the terminal afterwards does
+// not re-render it until the next connect/resume.
+function formatStatusText(conn: SshConnection, portLabel: string | number): string {
+  const cols = process.stdout.columns ?? 80;
+  const cwd = conn.remoteHome && conn.remoteCwd.startsWith(conn.remoteHome)
+    ? `~${conn.remoteCwd.slice(conn.remoteHome.length)}`
+    : conn.remoteCwd;
+
+  if (cols >= 140) return `SSH ${conn.remote}:${cwd} (port ${portLabel})`;
+  if (cols >= 110) return `SSH ${conn.remote}:${cwd}`;
+  if (cols >= 80) return `SSH ${conn.remote}`;
+  const host = conn.remote.length > 24 ? `${conn.remote.slice(0, 23)}…` : conn.remote;
+  return `SSH ${host}`;
+}
 
   const deactivateConnection = async (ctx: ExtensionContext): Promise<void> => {
     if (transport) {
