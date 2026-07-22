@@ -6,9 +6,13 @@ import { join } from "node:path";
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   createBashTool,
+  createBashToolDefinition,
   createEditTool,
+  createEditToolDefinition,
   createReadTool,
+  createReadToolDefinition,
   createWriteTool,
+  createWriteToolDefinition,
   type BashOperations,
   type EditOperations,
   type ReadOperations,
@@ -1085,11 +1089,20 @@ export default function piSshExtension(pi: ExtensionAPI): void {
     if (ctx.hasUI) ctx.ui.setStatus("pi-ssh", undefined);
   };
 
+  // Spread the UNWRAPPED tool definitions (create*ToolDefinition) rather than the
+  // wrapped AgentTools (create*Tool): wrapToolDefinition() strips renderCall and
+  // renderResult, which is why ssh_* tools previously fell back to name-only
+  // fallback rendering in the TUI. The renderers are pure functions of
+  // args/result/details and do not touch operations, so they work unchanged for
+  // remote results. promptSnippet/promptGuidelines are overridden because the
+  // built-in ones name the local tools ("read", "write", ...), not ssh_*.
   pi.registerTool({
-    ...localRead,
+    ...createReadToolDefinition(localCwd),
     name: "ssh_read",
     label: "ssh_read",
     description: `Read a file on the remote SSH host. ${localRead.description}`,
+    promptSnippet: "Read file contents on the remote SSH host",
+    promptGuidelines: ["Use ssh_read to examine files on the remote SSH host instead of cat or sed via ssh_bash."],
     async execute(id, params, signal, onUpdate) {
       const { conn, transport } = requireSsh("ssh_read");
       const tool = createReadTool(localCwd, { operations: createRemoteReadOps(conn, transport) });
@@ -1098,10 +1111,12 @@ export default function piSshExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    ...localWrite,
+    ...createWriteToolDefinition(localCwd),
     name: "ssh_write",
     label: "ssh_write",
     description: `Write a file on the remote SSH host. ${localWrite.description}`,
+    promptSnippet: "Create or overwrite files on the remote SSH host",
+    promptGuidelines: ["Use ssh_write only for new files or complete rewrites on the remote SSH host."],
     async execute(id, params, signal, onUpdate) {
       const { conn, transport } = requireSsh("ssh_write");
       const tool = createWriteTool(localCwd, { operations: createRemoteWriteOps(conn, transport) });
@@ -1110,10 +1125,15 @@ export default function piSshExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    ...localEdit,
+    ...createEditToolDefinition(localCwd),
     name: "ssh_edit",
     label: "ssh_edit",
     description: `Edit a file on the remote SSH host. ${localEdit.description}`,
+    promptSnippet: "Make precise edits to files on the remote SSH host with exact text replacement",
+    promptGuidelines: [
+      "Use ssh_edit for precise changes to files on the remote SSH host (edits[].oldText must match exactly)",
+      "When changing multiple separate locations in one remote file, use one ssh_edit call with multiple entries in edits[] instead of multiple ssh_edit calls",
+    ],
     async execute(id, params, signal, onUpdate) {
       const { conn, transport } = requireSsh("ssh_edit");
       const tool = createEditTool(localCwd, { operations: createRemoteEditOps(conn, transport) });
@@ -1122,10 +1142,11 @@ export default function piSshExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    ...localBash,
+    ...createBashToolDefinition(localCwd),
     name: "ssh_bash",
     label: "ssh_bash",
     description: `Run a shell command on the remote SSH host. ${localBash.description}`,
+    promptSnippet: "Execute bash commands on the remote SSH host (ls, grep, find, etc.)",
     async execute(id, params, signal, onUpdate) {
       const { transport } = requireSsh("ssh_bash");
       const tool = createBashTool(localCwd, { operations: createRemoteBashOps(transport) });
