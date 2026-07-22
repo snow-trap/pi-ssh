@@ -184,6 +184,25 @@ function expandEnvVars(value: string): string {
   });
 }
 
+// Per-host default remote paths, loaded from ~/.pi/agent/pi-ssh-defaults.json
+// (e.g. {"myremote": "/workspace/user@example.com"}). Lets "/ssh myremote"
+// land in a project directory instead of the remote login HOME.
+function readDefaultRemotePaths(): Record<string, string> {
+  try {
+    const raw = JSON.parse(readFileSync(join(homedir(), ".pi", "agent", "pi-ssh-defaults.json"), "utf-8"));
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(raw)) {
+        if (typeof value === "string" && value.trim()) out[key] = value.trim();
+      }
+      return out;
+    }
+  } catch {
+    // Missing or invalid file: no defaults.
+  }
+  return {};
+}
+
 function parseSshFlag(raw: string): { remote: string; remotePath?: string } {
   const value = expandEnvVars(raw.trim());
   if (!value) {
@@ -965,7 +984,10 @@ async function resolveSshConnection(rawFlag: string, localCwd: string, localHome
     throw new Error("Failed to detect remote HOME");
   }
 
-  if (!parsed.remotePath) {
+  const defaultPath = readDefaultRemotePaths()[parsed.remote];
+  const remotePath = parsed.remotePath ?? defaultPath;
+
+  if (!remotePath) {
     const remotePwd = await sshExec(parsed.remote, port, "pwd", { timeoutSeconds: 15 });
     return {
       remote: parsed.remote,
@@ -977,7 +999,7 @@ async function resolveSshConnection(rawFlag: string, localCwd: string, localHome
     };
   }
 
-  const resolvedPath = await sshExec(parsed.remote, port, buildResolveRemotePathCommand(parsed.remotePath), {
+  const resolvedPath = await sshExec(parsed.remote, port, buildResolveRemotePathCommand(remotePath), {
     timeoutSeconds: 15,
   });
 
