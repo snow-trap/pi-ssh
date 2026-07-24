@@ -1176,6 +1176,9 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
   interface BadgeWrapper extends BadgeableComponent {
     __sshBadgeInner: BadgeableComponent;
   }
+  // Snapshot the host per tool call so historical calls keep the badge of the
+  // connection they ran on, even after switching SSH hosts.
+  const hostByToolCallId = new Map<string, string | undefined>();
   const withSshBadge = <T extends { renderCall?: (...args: never[]) => BadgeableComponent }>(def: T): T => {
     if (!def.renderCall) return def;
     const inner = def.renderCall;
@@ -1185,7 +1188,7 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
         const [toolArgs, theme, context] = args as unknown as [
           unknown,
           { fg: (color: string, text: string) => string },
-          { lastComponent?: BadgeableComponent | BadgeWrapper } & Record<string, unknown>,
+          { toolCallId: string; lastComponent?: BadgeableComponent | BadgeWrapper } & Record<string, unknown>,
         ];
         // pi caches our returned component as context.lastComponent and hands
         // it back on the next call. The built-in renderer expects its own
@@ -1194,11 +1197,14 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
         const innerContext =
           last && "__sshBadgeInner" in last ? { ...context, lastComponent: last.__sshBadgeInner } : context;
         const component = inner(...([toolArgs, theme, innerContext] as never[]));
+        if (!hostByToolCallId.has(context.toolCallId)) {
+          hostByToolCallId.set(context.toolCallId, connection?.remote);
+        }
+        const host = hostByToolCallId.get(context.toolCallId);
         const wrapper: BadgeWrapper = {
           __sshBadgeInner: component,
           invalidate: () => component.invalidate?.(),
           render(width: number): string[] {
-            const host = connection?.remote;
             const badge = theme.fg("accent", host ? `[${host}]` : "[ssh]");
             // Badge on its own line above the call content, so the inner
             // component keeps the full terminal width.
@@ -1269,6 +1275,7 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
   });
 
   pi.on("session_start", async (event, ctx) => {
+    hostByToolCallId.clear();
     const flag = pi.getFlag("ssh") as string | undefined;
 
     if (flag) {
