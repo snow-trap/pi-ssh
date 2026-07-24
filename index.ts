@@ -1165,8 +1165,38 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
   // args/result/details and do not touch operations, so they work unchanged for
   // remote results. promptSnippet/promptGuidelines are overridden because the
   // built-in ones name the local tools ("read", "write", ...), not ssh_*.
+
+  // Reusing the built-in renderers makes ssh_* calls look identical to local
+  // tool calls. Wrap renderCall to prepend an accent-colored [host] badge to
+  // the first rendered line so remote executions are visually distinct.
+  interface BadgeableComponent {
+    render(width: number): string[];
+    invalidate?(): void;
+  }
+  const withSshBadge = <T extends { renderCall?: (...args: never[]) => BadgeableComponent }>(def: T): T => {
+    if (!def.renderCall) return def;
+    const inner = def.renderCall;
+    return {
+      ...def,
+      renderCall(...args: Parameters<NonNullable<T["renderCall"]>>) {
+        const component = inner(...args);
+        const theme = args[1] as unknown as { fg: (color: string, text: string) => string };
+        return {
+          invalidate: () => component.invalidate?.(),
+          render(width: number): string[] {
+            const lines = component.render(width);
+            if (lines.length === 0) return lines;
+            const host = connection?.remote;
+            const badge = theme.fg("accent", host ? `[${host}] ` : "[ssh] ");
+            return [badge + lines[0], ...lines.slice(1)];
+          },
+        };
+      },
+    } as T;
+  };
+
   pi.registerTool({
-    ...createReadToolDefinition(localCwd),
+    ...withSshBadge(createReadToolDefinition(localCwd)),
     name: "ssh_read",
     label: "ssh_read",
     description: `Read a file on the remote SSH host. ${localRead.description}`,
@@ -1180,7 +1210,7 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
   });
 
   pi.registerTool({
-    ...createWriteToolDefinition(localCwd),
+    ...withSshBadge(createWriteToolDefinition(localCwd)),
     name: "ssh_write",
     label: "ssh_write",
     description: `Write a file on the remote SSH host. ${localWrite.description}`,
@@ -1194,7 +1224,7 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
   });
 
   pi.registerTool({
-    ...createEditToolDefinition(localCwd),
+    ...withSshBadge(createEditToolDefinition(localCwd)),
     name: "ssh_edit",
     label: "ssh_edit",
     description: `Edit a file on the remote SSH host. ${localEdit.description}`,
@@ -1211,7 +1241,7 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
   });
 
   pi.registerTool({
-    ...createBashToolDefinition(localCwd),
+    ...withSshBadge(createBashToolDefinition(localCwd)),
     name: "ssh_bash",
     label: "ssh_bash",
     description: `Run a shell command on the remote SSH host. ${localBash.description}`,
