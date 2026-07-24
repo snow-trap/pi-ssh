@@ -1173,15 +1173,29 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
     render(width: number): string[];
     invalidate?(): void;
   }
+  interface BadgeWrapper extends BadgeableComponent {
+    __sshBadgeInner: BadgeableComponent;
+  }
   const withSshBadge = <T extends { renderCall?: (...args: never[]) => BadgeableComponent }>(def: T): T => {
     if (!def.renderCall) return def;
     const inner = def.renderCall;
     return {
       ...def,
       renderCall(...args: Parameters<NonNullable<T["renderCall"]>>) {
-        const component = inner(...args);
-        const theme = args[1] as unknown as { fg: (color: string, text: string) => string };
-        return {
+        const [toolArgs, theme, context] = args as unknown as [
+          unknown,
+          { fg: (color: string, text: string) => string },
+          { lastComponent?: BadgeableComponent | BadgeWrapper } & Record<string, unknown>,
+        ];
+        // pi caches our returned component as context.lastComponent and hands
+        // it back on the next call. The built-in renderer expects its own
+        // component type (it calls e.g. setText on it), so unwrap ours first.
+        const last = context.lastComponent;
+        const innerContext =
+          last && "__sshBadgeInner" in last ? { ...context, lastComponent: last.__sshBadgeInner } : context;
+        const component = inner(...([toolArgs, theme, innerContext] as never[]));
+        const wrapper: BadgeWrapper = {
+          __sshBadgeInner: component,
           invalidate: () => component.invalidate?.(),
           render(width: number): string[] {
             const host = connection?.remote;
@@ -1196,6 +1210,7 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
             return [badge + lines[0], ...lines.slice(1)];
           },
         };
+        return wrapper;
       },
     } as T;
   };
