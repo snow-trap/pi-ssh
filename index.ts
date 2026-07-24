@@ -1199,15 +1199,10 @@ function formatStatusText(conn: SshConnection, portLabel: string | number): stri
           invalidate: () => component.invalidate?.(),
           render(width: number): string[] {
             const host = connection?.remote;
-            const badge = theme.fg("accent", host ? `[${host}] ` : "[ssh] ");
-            // Render the inner component at width minus the badge so the
-            // combined first line never exceeds the terminal width.
-            // Badge text is plain ASCII ("[host] "), so its visible width
-            // equals the unstyled string length — no pi-tui import needed.
-            const innerWidth = Math.max(1, width - (host ? host.length + 3 : 6));
-            const lines = component.render(innerWidth);
-            if (lines.length === 0) return lines;
-            return [badge + lines[0], ...lines.slice(1)];
+            const badge = theme.fg("accent", host ? `[${host}]` : "[ssh]");
+            // Badge on its own line above the call content, so the inner
+            // component keeps the full terminal width.
+            return [badge, ...component.render(width)];
           },
         };
         return wrapper;
